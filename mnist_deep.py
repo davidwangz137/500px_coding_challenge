@@ -29,9 +29,11 @@ from __future__ import print_function
 import argparse
 import sys
 
-from tensorflow.examples.tutorials.mnist import input_data
+import logging
+logging.getLogger("tensorflow").setLevel(logging.WARNING)
 
 import tensorflow as tf
+from tensorflow.examples.tutorials.mnist import input_data
 
 FLAGS = None
 
@@ -113,43 +115,66 @@ def bias_variable(shape):
   initial = tf.constant(0.1, shape=shape)
   return tf.Variable(initial)
 
+# Parse arguments
+parser = argparse.ArgumentParser()
+parser.add_argument('--data_dir', type=str,
+                  default='/tmp/tensorflow/mnist/input_data',
+                  help='Directory for storing input data')
+parser.add_argument('--create_adv', action="store_true", default=False)
+FLAGS, unparsed = parser.parse_known_args()
 
-def main(_):
-  # Import data
-  mnist = input_data.read_data_sets(FLAGS.data_dir, one_hot=True)
+# Import data
+mnist = input_data.read_data_sets(FLAGS.data_dir, one_hot=True)
 
-  # Create the model
-  x = tf.placeholder(tf.float32, [None, 784])
+# Create the model
+tf.reset_default_graph()  # In case we are running this multiple times in a IPython session
+x = tf.placeholder(tf.float32, [None, 784])
 
-  # Define loss and optimizer
-  y_ = tf.placeholder(tf.float32, [None, 10])
+# Define loss and optimizer
+y_ = tf.placeholder(tf.float32, [None, 10])
 
-  # Build the graph for the deep net
-  y_conv, keep_prob = deepnn(x)
+# Build the graph for the deep net
+y_conv, keep_prob = deepnn(x)
 
-  cross_entropy = tf.reduce_mean(
-      tf.nn.softmax_cross_entropy_with_logits(labels=y_, logits=y_conv))
-  train_step = tf.train.AdamOptimizer(1e-4).minimize(cross_entropy)
-  correct_prediction = tf.equal(tf.argmax(y_conv, 1), tf.argmax(y_, 1))
-  accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
+cross_entropy = tf.reduce_mean(
+  tf.nn.softmax_cross_entropy_with_logits(labels=y_, logits=y_conv))
+train_step = tf.train.AdamOptimizer(1e-4).minimize(cross_entropy)
+correct_prediction = tf.equal(tf.argmax(y_conv, 1), tf.argmax(y_, 1))
+accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
 
-  with tf.Session() as sess:
-    sess.run(tf.global_variables_initializer())
+# Create the session and saver
+sess = tf.Session()
+trainable_vars = tf.trainable_variables()  # We can modify this to load only some of the variables using the Saver. I don't like this design but its not that bad... yet
+saver = tf.train.Saver(var_list=trainable_vars, max_to_keep=0)  # Keep all checkpoints
+sess.run(tf.global_variables_initializer())
+
+if FLAGS.create_adv:
+    logging.info("Creating adverserial examples!")
+
+    # We load the model from before
+    saver.restore(sess, 'model_checkpoints/mnist_deep.ckpt-1000')
+    batch = mnist.train.next_batch(50)  # Sanity check
+    train_accuracy = sess.run(accuracy, feed_dict={
+        x: batch[0], y_: batch[1], keep_prob: 1.0})
+    print('training accuracy %g' % train_accuracy)  # Sanity check accuracy
+
+    # Create adverserial images
+
+    # Plot the images
+
+else:
     for i in range(20000):
-      batch = mnist.train.next_batch(50)
-      if i % 100 == 0:
-        train_accuracy = accuracy.eval(feed_dict={
-            x: batch[0], y_: batch[1], keep_prob: 1.0})
-        print('step %d, training accuracy %g' % (i, train_accuracy))
-      train_step.run(feed_dict={x: batch[0], y_: batch[1], keep_prob: 0.5})
+        batch = mnist.train.next_batch(50)
+        if i % 100 == 0:
+            train_accuracy = sess.run(accuracy, feed_dict={
+                x: batch[0], y_: batch[1], keep_prob: 1.0})
+            print('step %d, training accuracy %g' % (i, train_accuracy))
+            saver.save(sess, 'model_checkpoints/mnist_deep.ckpt', global_step=i)
+        sess.run(train_step, feed_dict={x: batch[0], y_: batch[1], keep_prob: 0.5})
 
-    print('test accuracy %g' % accuracy.eval(feed_dict={
-        x: mnist.test.images, y_: mnist.test.labels, keep_prob: 1.0}))
+    print('test accuracy %g' % sess.run(accuracy, feed_dict={
+            x: mnist.test.images, y_: mnist.test.labels, keep_prob: 1.0}))
 
-if __name__ == '__main__':
-  parser = argparse.ArgumentParser()
-  parser.add_argument('--data_dir', type=str,
-                      default='/tmp/tensorflow/mnist/input_data',
-                      help='Directory for storing input data')
-  FLAGS, unparsed = parser.parse_known_args()
-  tf.app.run(main=main, argv=[sys.argv[0]] + unparsed)
+# Close the session so we don't pollute the IPython session on multiple runs
+# TODO: If we have a GPU already allocated, then might be faster to not close and keep the old session around. Test this
+sess.close()
