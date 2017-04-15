@@ -32,6 +32,8 @@ import sys
 import logging
 logging.getLogger("tensorflow").setLevel(logging.WARNING)
 
+import matplotlib.pyplot as plt
+import numpy as np
 import tensorflow as tf
 from tensorflow.examples.tutorials.mnist import input_data
 
@@ -51,12 +53,14 @@ class CNNMNIST():
     def __init__(self, FLAGS):
         # Input placeholders
         if FLAGS.create_adv:
-            x = tf.Variable(tf.zeros([FLAGS.batch_size, 784], dtype=tf.float32), trainable=False)
+            x = tf.Variable(tf.zeros([FLAGS.batch_size, 784], dtype=tf.float32), trainable=False, name="x")
+            x_input = tf.placeholder(tf.float32, [FLAGS.batch_size, 784], name="x_input")
+            assign_x = x.assign(x_input)
         else:
             x = tf.placeholder(tf.float32, [FLAGS.batch_size, 784])
-        y_ = tf.placeholder(tf.float32, [FLAGS.batch_size, 10])
-        keep_prob = tf.placeholder(tf.float32)
-        self.placeholders = {'x':x, 'y_':y_, 'keep_prob':keep_prob}
+        y_ = tf.placeholder(tf.float32, [FLAGS.batch_size, 10], name="y_")
+        keep_prob = tf.placeholder(tf.float32, name="keep_prob")
+        self.placeholders = {'x':x, 'x_input':x_input, 'y_':y_, 'keep_prob':keep_prob}
 
         # Reshape to use within a convolutional neural net.
         # Last dimension is for "features" - there is only one here, since images are
@@ -109,7 +113,7 @@ class CNNMNIST():
         self.output = {'logits_last':y_conv, 'cross_entropy':cross_entropy, 'accuracy': accuracy}
 
         # Additional ops of interest for debugging or experimentation
-        self.ops = {}
+        self.ops = {'assign_x':assign_x}
 
     def prepare_feed_dict(self, x, y_, dropout_prob):
         return {model.placeholders['x']: x, model.placeholders['y_']: y_, model.placeholders['keep_prob']: dropout_prob}
@@ -169,10 +173,47 @@ if FLAGS.create_adv:
     train_accuracy = sess.run(model.output['accuracy'], feed_dict=model.prepare_feed_dict(x=batch[0], y_=batch[1], dropout_prob=1.0))
     print('training accuracy %g' % train_accuracy)  # Sanity check accuracy
 
-    # Create adverserial images
-    grad_image = model.optimizer['optimizer'].compute_gradients(model.output['logits_last'], [model.placeholders['x']])
+    # Create adverserial images. Since we are trying to fool 2's specifically we minimize the softmax probability of it being a two. Or equivalently take the negative of the cross_entropy
+    grad_tuple_list = model.optimizer['optimizer'].compute_gradients(-model.output['cross_entropy'], [model.placeholders['x']])
+    grad_probs = grad_tuple_list[0][0]
+    softmax_probs = tf.nn.softmax(model.output['logits_last'])
 
+    twos = mnist.train.images[mnist.train.labels[:,2] == 1,:]  # NOTE: This looks like zeros unless you print the entire thing
+    twos_adv = twos[:FLAGS.batch_size].copy()  # The images we are going to optimize in value
+    twos_adv_start = twos[:FLAGS.batch_size].copy()  # The starting images for comparison
+    labels_two = np.zeros((FLAGS.batch_size, 10))  # For computing the loss
+    labels_two[:,2] = 1
+    sess.run(model.ops['assign_x'], feed_dict={model.placeholders['x_input']: twos_adv})
+
+    # Get and apply the gradients using numpy in a loop since the optimizer has momentum
+    # NOTE: Different images have different twoness. Some require larger pushes and larger learning rates. So we might need to manually set learning rate for each image...
+    # TODO: Set colorbar of plot by max and min range of images: [0,1]
+    # TODO: Try directly optimizing the class probability of another label, whichever is the greatest already for the image.
+
+    grad = sess.run(grad_probs, feed_dict={model.placeholders['y_']:labels_two, model.placeholders['keep_prob']:1.0})
+    grad_norm = np.sqrt(np.sum(grad*grad, axis=1))
+
+    learning_rate = 0.1
+    log_ind = 2  # The index which to check the probability for
+    print("Optimizing adverserial images!")
+    for i in range(50):
+        grad = sess.run(grad_probs, feed_dict={model.placeholders['y_']:labels_two, model.placeholders['keep_prob']:1.0})
+        twos_adv -= learning_rate*grad
+        sess.run(model.ops['assign_x'], feed_dict={model.placeholders['x_input']: twos_adv})
+        probs = sess.run(softmax_probs, feed_dict={model.placeholders['keep_prob']:1.0})
+        print(probs[log_ind])
+        plt.imshow(twos_adv[log_ind].reshape((28, 28)), cmap='Greys')
+        plt.savefig('plots/two_adv%d.png' % i)
+    
     # Plot the images
+
+    # Sanity check
+    #x1 = sess.run(model.placeholders['x'])
+    #sess.run(model.ops['assign_x'], feed_dict={model.placeholders['x_input']: np.ones((FLAGS.batch_size, 784))})
+    #x2 = sess.run(model.placeholders['x'])
+    # Sanity check 2
+    #plt.imshow(twos[0].reshape((28,28)), cmap='Greys')
+    #plt.show()
 
 else:
     for i in range(20000):
